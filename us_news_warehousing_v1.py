@@ -46,12 +46,18 @@ DB_CONFIG_PATH = 'db_config.yaml'
 TABLE_NAME     = 'us_news'
 PROGRESS_FILE  = 'progress_us.txt'
 
+# Slack member IDs for alert tagging — fill in before deploying
+SLACK_MENTION_SHUBHAM = '@Shubham Shreshtha'   # Shubham Shreshtha: Profile → ··· → Copy member ID
+SLACK_MENTION_TEJASV  = '@Tejasv Sharma'   # Tejasv Sharma: Profile → ··· → Copy member ID
+SLACK_MENTIONS        = f"{SLACK_MENTION_SHUBHAM} {SLACK_MENTION_TEJASV}"
+
 # ---------------------------------------------------------------------------
 # GLOBAL COUNTERS
 # ---------------------------------------------------------------------------
-API_CALL_COUNT = 0
-CAP_HIT_COUNT  = 0   # RICs that returned exactly 100 headlines (truncated)
-SKIP_COUNT     = 0   # RICs skipped due to non-retryable errors
+API_CALL_COUNT  = 0
+CAP_HIT_COUNT   = 0   # RICs that returned exactly 100 headlines (truncated)
+SKIP_COUNT      = 0   # RICs skipped due to non-retryable errors
+EMPTY_RIC_COUNT = 0   # RICs that returned 0 headlines
 
 # ---------------------------------------------------------------------------
 # LOGGING
@@ -235,8 +241,10 @@ def fetch_news_for_stock(instrument, date_chunks, limiter, max_retries=3, retry_
 # ---------------------------------------------------------------------------
 def fetch_news_for_multiple_stocks(rics, date_chunks, limiter, start_from_index=0,
                                    last_sleep_time_holder=None):
+    global EMPTY_RIC_COUNT
     all_news     = []
     last_saved_i = start_from_index - 1
+    capped       = False   # True if loop exited early due to request cap
 
     for i, ric in enumerate(tqdm(rics, desc="RICs")):
         if i < start_from_index:
@@ -245,6 +253,7 @@ def fetch_news_for_multiple_stocks(rics, date_chunks, limiter, start_from_index=
             logger.info(f"Stopped at {limiter.request_count} requests (max per run reached). "
                         f"Last completed RIC index: {last_saved_i}")
             _save_progress(last_saved_i)
+            capped = True
             break
 
         df = fetch_news_for_stock(ric, date_chunks, limiter,
@@ -255,6 +264,8 @@ def fetch_news_for_multiple_stocks(rics, date_chunks, limiter, start_from_index=
                 print(df['text'].head(5).to_string(index=False))
                 print(f"(Total headlines for {ric}: {len(df)})\n")
             all_news.append(df)
+        else:
+            EMPTY_RIC_COUNT += 1
 
         last_saved_i = i
         _save_progress(i)  # write after every RIC so any crash/interrupt preserves progress
@@ -262,8 +273,8 @@ def fetch_news_for_multiple_stocks(rics, date_chunks, limiter, start_from_index=
     if all_news:
         full_df = pd.concat(all_news, ignore_index=True)
         full_df = full_df.drop_duplicates(subset='storyId')
-        return full_df, last_saved_i
-    return pd.DataFrame(), last_saved_i
+        return full_df, last_saved_i, capped
+    return pd.DataFrame(), last_saved_i, capped
 
 # ---------------------------------------------------------------------------
 # PROGRESS FILE — stores "YYYY-MM-DD:ric_index"
@@ -388,7 +399,7 @@ if __name__ == "__main__":
     config    = load_config(CONFIG_PATH)
     db_config = load_db_config(DB_CONFIG_PATH)
 
-    send_msg_via_slack("US Eikon News job started")
+    send_msg_via_slack(f"🚀 *US News* — job started {SLACK_MENTIONS}")
 
     ek.set_app_key(config['ekn']['jdn'])
     engine = get_pg_engine(db_config['wm_price_db'])
@@ -417,8 +428,9 @@ if __name__ == "__main__":
     last_sleep_time_holder = [time.time()]
 
     # --- Fetch per-RIC news ---
+    capped = False
     try:
-        news_df_all, last_completed_index = fetch_news_for_multiple_stocks(
+        news_df_all, last_completed_index, capped = fetch_news_for_multiple_stocks(
             rics=rics,
             date_chunks=date_chunks,
             limiter=limiter,
@@ -429,17 +441,16 @@ if __name__ == "__main__":
             print_step_output("Stock-wise News", news_df_all)
         logger.info(f"News fetch complete. {len(news_df_all)} records fetched.")
     except KeyboardInterrupt:
-        msg = "US Eikon News job interrupted by user (Ctrl+C). Progress saved to last completed RIC."
-        logger.warning(msg)
-        send_msg_via_slack(msg)
+        logger.warning("Job interrupted by user (Ctrl+C). Progress saved.")
+        send_msg_via_slack(f"⚠️ *US News* — interrupted (Ctrl+C). Progress saved. {SLACK_MENTIONS}")
         news_df_all = pd.DataFrame()
         last_completed_index = -1
     except Exception as e:
         error_str = str(e).lower()
         if "connection refused" in error_str or "winerror 10061" in error_str:
-            msg = "US Eikon News job failed: Eikon desktop disconnected. Reopen Eikon and re-run — progress is saved."
+            msg = f"❌ *US News* — Eikon disconnected. Reopen & re-run, progress saved. {SLACK_MENTIONS}"
         else:
-            msg = f"US Eikon News job failed: {e}"
+            msg = f"❌ *US News* — failed: `{e}` {SLACK_MENTIONS}"
         logger.error(msg)
         send_msg_via_slack(msg)
         news_df_all = pd.DataFrame()
@@ -447,9 +458,24 @@ if __name__ == "__main__":
 
     print(f"\nTotal API calls made: {API_CALL_COUNT}\n")
 
+    # --- Alert: request cap hit with RICs remaining ---
+    if capped:
+        rics_done      = last_completed_index + 1
+        rics_remaining = len(rics) - rics_done
+        logger.warning(f"Request cap exhausted. {rics_remaining} RICs unprocessed.")
+        send_msg_via_slack(
+            f"⚠️ *US News* — cap exhausted ({MAX_REQUESTS_PER_RUN} calls)\n"
+            f"• Done : {rics_done} / {len(rics)} RICs\n"
+            f"• Left : {rics_remaining} RICs (will resume tomorrow)\n"
+            f"{SLACK_MENTIONS}"
+        )
+
     if news_df_all.empty:
         logger.warning("No news fetched. Nothing to upsert.")
-        send_msg_via_slack("US Eikon News job finished — no news fetched, nothing upserted. Check Eikon session or date window.")
+        send_msg_via_slack(
+            f"⚠️ *US News* — 0 headlines fetched, nothing upserted.\n"
+            f"Check Eikon session / date window. {SLACK_MENTIONS}"
+        )
         exit(0)
 
     # --- Rename columns ---
@@ -477,15 +503,19 @@ if __name__ == "__main__":
     logger.info(f"Progress saved. Last completed RIC index: {last_completed_index} / {len(rics) - 1}")
 
     # --- Slack finish summary ---
-    run_secs = int(time.time() - run_start_time)
+    run_secs     = int(time.time() - run_start_time)
     run_time_str = f"{run_secs // 60}m {run_secs % 60}s"
+    rics_total   = len(rics)
     summary = (
-        f"*US Eikon News job finished* ✅\n"
-        f"• Records upserted : {len(news_df_all):,}\n"
-        f"• API calls made   : {API_CALL_COUNT}\n"
-        f"• Cap hits (100)   : {CAP_HIT_COUNT} RICs\n"
-        f"• Skipped RICs     : {SKIP_COUNT}\n"
-        f"• Run time         : {run_time_str}\n"
-        f"• Window           : {start_dt.date()} → {end_dt.date()}"
+        f"✅ *US News — Done* {SLACK_MENTIONS}\n"
+        f"```\n"
+        f"Upserted   : {len(news_df_all):>6,}\n"
+        f"API calls  : {API_CALL_COUNT:>6}\n"
+        f"Empty RICs : {EMPTY_RIC_COUNT:>6} / {rics_total}\n"
+        f"Cap hits   : {CAP_HIT_COUNT:>6}\n"
+        f"Skipped    : {SKIP_COUNT:>6}\n"
+        f"Run time   : {run_time_str:>6}\n"
+        f"Window     : {start_dt.date()} → {end_dt.date()}\n"
+        f"```"
     )
     send_msg_via_slack(summary)
