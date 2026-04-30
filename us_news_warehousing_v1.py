@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-US News Warehousing — Prototype
+US News Warehousing v1
 Fetches daily per-RIC news for the top 500 US equities (by market cap)
 and upserts into PostgreSQL table `us_news`.
 
 Universe source : PostgreSQL `us_universe` (NOT MongoDB)
 Scope           : Daily news only — no backfill
 Progress        : progress_us.txt tracks last completed RIC index within today's run
+
+Version : 1.0
+Date    : 2026-04-30
+Author  : Shubham Shreshtha <shubham.shreshtha@smallcase.com>
 """
 
 import pandas as pd
@@ -292,12 +296,15 @@ def _load_progress() -> int:
 def create_us_news_table(engine):
     ddl = f"""
     CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-        version_created TIMESTAMPTZ,
-        heading         TEXT,
-        story_id        TEXT PRIMARY KEY,
-        source_code     TEXT,
-        ric             TEXT,
-        news_text       TEXT
+        version_created  TIMESTAMPTZ,
+        heading          TEXT,
+        story_id         TEXT PRIMARY KEY,
+        source_code      TEXT,
+        ric              TEXT,
+        news_text        TEXT,
+        theme_status     TEXT        DEFAULT 'pending',
+        theme_status_at  TIMESTAMPTZ DEFAULT NOW(),
+        kept_story_id    TEXT
     );
     """
     with engine.begin() as conn:
@@ -312,14 +319,15 @@ def upsert_final_news(engine, table_name, final_news):
     with engine.begin() as conn:
         for row in records:
             insert_stmt = f"""
-            INSERT INTO {table_name} (version_created, heading, story_id, source_code, ric, news_text)
-            VALUES (:version_created, :heading, :story_id, :source_code, :ric, :news_text)
+            INSERT INTO {table_name} (version_created, heading, story_id, source_code, ric, news_text,
+                                      theme_status, theme_status_at, kept_story_id)
+            VALUES (:version_created, :heading, :story_id, :source_code, :ric, :news_text,
+                    'pending', NOW(), NULL)
             ON CONFLICT (story_id) DO UPDATE SET
                 version_created = EXCLUDED.version_created,
                 heading         = EXCLUDED.heading,
                 source_code     = EXCLUDED.source_code,
-                ric             = EXCLUDED.ric,
-                news_text       = EXCLUDED.news_text;
+                ric             = EXCLUDED.ric;
             """
             conn.execute(text(insert_stmt), row)
     print(f"Upserted {len(records)} records to '{table_name}'.")
