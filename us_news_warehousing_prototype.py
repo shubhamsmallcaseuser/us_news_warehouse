@@ -51,7 +51,8 @@ API_CALL_COUNT = 0
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    filename='us_news_fetch.log'
+    filename='us_news_fetch.log',
+    force=True
 )
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
@@ -240,6 +241,7 @@ def fetch_news_for_multiple_stocks(rics, date_chunks, limiter, start_from_index=
             all_news.append(df)
 
         last_saved_i = i
+        _save_progress(i)  # write after every RIC so any crash/interrupt preserves progress
 
     if all_news:
         full_df = pd.concat(all_news, ignore_index=True)
@@ -365,10 +367,19 @@ if __name__ == "__main__":
         if VERBOSE and not news_df_all.empty:
             print_step_output("Stock-wise News", news_df_all)
         logger.info(f"News fetch complete. {len(news_df_all)} records fetched.")
-    except Exception as e:
-        logger.error(f"Stopped execution due to: {e}")
+    except KeyboardInterrupt:
+        logger.warning("Run interrupted by user (Ctrl+C). Progress saved to last completed RIC.")
         news_df_all = pd.DataFrame()
-        last_completed_index = start_from_index - 1
+        last_completed_index = -1  # already written per-RIC inside the loop
+    except Exception as e:
+        error_str = str(e).lower()
+        if "connection refused" in error_str or "winerror 10061" in error_str:
+            logger.error("Eikon desktop disconnected (ConnectionRefusedError). "
+                         "Reopen Eikon and re-run — progress is saved.")
+        else:
+            logger.error(f"Stopped execution due to: {e}")
+        news_df_all = pd.DataFrame()
+        last_completed_index = -1  # already written per-RIC inside the loop
 
     print(f"\nTotal API calls made: {API_CALL_COUNT}\n")
 
