@@ -47,8 +47,8 @@ TABLE_NAME     = 'us_news'
 PROGRESS_FILE  = 'progress_us.txt'
 
 # Slack member IDs for alert tagging — fill in before deploying
-SLACK_MENTION_SHUBHAM = '@Shubham Shreshtha'   # Shubham Shreshtha: Profile → ··· → Copy member ID
-SLACK_MENTION_TEJASV  = '@Tejasv Sharma'   # Tejasv Sharma: Profile → ··· → Copy member ID
+SLACK_MENTION_SHUBHAM = '<@Shubham Shreshtha>'   # Shubham Shreshtha: Profile → ··· → Copy member ID
+SLACK_MENTION_TEJASV  = '<@Tejasv Sharma>'   # Tejasv Sharma: Profile → ··· → Copy member ID
 SLACK_MENTIONS        = f"{SLACK_MENTION_SHUBHAM} {SLACK_MENTION_TEJASV}"
 
 # ---------------------------------------------------------------------------
@@ -266,6 +266,7 @@ def fetch_news_for_multiple_stocks(rics, date_chunks, limiter, start_from_index=
             all_news.append(df)
         else:
             EMPTY_RIC_COUNT += 1
+            logger.info(f"[EMPTY] {ric}: no headlines returned for window")
 
         last_saved_i = i
         _save_progress(i)  # write after every RIC so any crash/interrupt preserves progress
